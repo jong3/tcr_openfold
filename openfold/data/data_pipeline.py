@@ -221,7 +221,7 @@ def make_pdb_features(
     return pdb_feats
 
 
-def make_msa_features(msas: Sequence[parsers.Msa]) -> FeatureDict:
+def  make_msa_features(msas: Sequence[parsers.Msa], deduplicate: bool = True) -> FeatureDict:
     """Constructs a feature dict of MSA features."""
     if not msas:
         raise ValueError("At least one MSA must be provided.")
@@ -236,6 +236,7 @@ def make_msa_features(msas: Sequence[parsers.Msa]) -> FeatureDict:
                 f"MSA {msa_index} must contain at least one sequence."
             )
         for sequence_index, sequence in enumerate(msa.sequences):
+            # if deduplicate and sequence in seen_sequences:
             if sequence in seen_sequences:
                 continue
             seen_sequences.add(sequence)
@@ -482,59 +483,67 @@ class AlignmentRunner:
         """Runs alignment tools on a sequence"""
         if(self.jackhmmer_uniref90_runner is not None):
             uniref90_out_path = os.path.join(output_dir, "uniref90_hits.sto")
+            if not os.path.exists(uniref90_out_path):
+                jackhmmer_uniref90_result = run_msa_tool(
+                    msa_runner=self.jackhmmer_uniref90_runner,
+                    fasta_path=fasta_path,
+                    msa_out_path=uniref90_out_path,
+                    msa_format='sto',
+                    max_sto_sequences=self.uniref_max_hits,
+                )
 
-            jackhmmer_uniref90_result = run_msa_tool(
-                msa_runner=self.jackhmmer_uniref90_runner,
-                fasta_path=fasta_path,
-                msa_out_path=uniref90_out_path,
-                msa_format='sto',
-                max_sto_sequences=self.uniref_max_hits,
-            )
+                template_msa = jackhmmer_uniref90_result["sto"]
+                template_msa = parsers.deduplicate_stockholm_msa(template_msa)
+                template_msa = parsers.remove_empty_columns_from_stockholm_msa(
+                    template_msa
+                )
 
-            template_msa = jackhmmer_uniref90_result["sto"]
-            template_msa = parsers.deduplicate_stockholm_msa(template_msa)
-            template_msa = parsers.remove_empty_columns_from_stockholm_msa(
-                template_msa
-            )
-
-            if(self.template_searcher is not None):
-                if(self.template_searcher.input_format == "sto"):
-                    pdb_templates_result = self.template_searcher.query(
-                        template_msa,
-                        output_dir=output_dir
-                    )
-                elif(self.template_searcher.input_format == "a3m"):
-                    uniref90_msa_as_a3m = parsers.convert_stockholm_to_a3m(
-                        template_msa
-                    )
-                    pdb_templates_result = self.template_searcher.query(
-                        uniref90_msa_as_a3m,
-                        output_dir=output_dir
-                    )
-                else:
-                    fmt = self.template_searcher.input_format
-                    raise ValueError(
-                        f"Unrecognized template input format: {fmt}"
-                    )
+                if(self.template_searcher is not None):
+                    if(self.template_searcher.input_format == "sto"):
+                        pdb_templates_result = self.template_searcher.query(
+                            template_msa,
+                            output_dir=output_dir
+                        )
+                    elif(self.template_searcher.input_format == "a3m"):
+                        uniref90_msa_as_a3m = parsers.convert_stockholm_to_a3m(
+                            template_msa
+                        )
+                        pdb_templates_result = self.template_searcher.query(
+                            uniref90_msa_as_a3m,
+                            output_dir=output_dir
+                        )
+                    else:
+                        fmt = self.template_searcher.input_format
+                        raise ValueError(
+                            f"Unrecognized template input format: {fmt}"
+                        )
+            else:
+                print(f"INFO: {uniref90_out_path} already exists.")
 
         if(self.jackhmmer_mgnify_runner is not None):
             mgnify_out_path = os.path.join(output_dir, "mgnify_hits.sto")
-            jackhmmer_mgnify_result = run_msa_tool(
-                msa_runner=self.jackhmmer_mgnify_runner,
-                fasta_path=fasta_path,
-                msa_out_path=mgnify_out_path,
-                msa_format='sto',
-                max_sto_sequences=self.mgnify_max_hits
-            )
+            if not os.path.exists(mgnify_out_path):
+                jackhmmer_mgnify_result = run_msa_tool(
+                    msa_runner=self.jackhmmer_mgnify_runner,
+                    fasta_path=fasta_path,
+                    msa_out_path=mgnify_out_path,
+                    msa_format='sto',
+                    max_sto_sequences=self.mgnify_max_hits
+                )
+            else:
+                print(f"INFO: {mgnify_out_path} already exists.")
 
         if(self.use_small_bfd and self.jackhmmer_small_bfd_runner is not None):
             bfd_out_path = os.path.join(output_dir, "small_bfd_hits.sto")
-            jackhmmer_small_bfd_result = run_msa_tool(
-                msa_runner=self.jackhmmer_small_bfd_runner,
-                fasta_path=fasta_path,
-                msa_out_path=bfd_out_path,
-                msa_format="sto",
-            )
+            if not os.path.exists(bfd_out_path):
+                jackhmmer_small_bfd_result = run_msa_tool(
+                    msa_runner=self.jackhmmer_small_bfd_runner,
+                    fasta_path=fasta_path,
+                    msa_out_path=bfd_out_path,
+                    msa_format="sto",
+                )
+            else:
+                print(f"INFO: {bfd_out_path} already exists.")
         elif(self.hhblits_bfd_unirefclust_runner is not None):
             uni_name = "uni"
             for db_name in self.hhblits_bfd_unirefclust_runner.databases:
@@ -544,22 +553,28 @@ class AlignmentRunner:
                     uni_name = f"{uni_name}clust"
 
             bfd_out_path = os.path.join(output_dir, f"bfd_{uni_name}_hits.a3m")
-            hhblits_bfd_unirefclust_result = run_msa_tool(
-                msa_runner=self.hhblits_bfd_unirefclust_runner,
-                fasta_path=fasta_path,
-                msa_out_path=bfd_out_path,
-                msa_format="a3m",
-            )
+            if not os.path.exists(bfd_out_path):
+                hhblits_bfd_unirefclust_result = run_msa_tool(
+                    msa_runner=self.hhblits_bfd_unirefclust_runner,
+                    fasta_path=fasta_path,
+                    msa_out_path=bfd_out_path,
+                    msa_format="a3m",
+                )
+            else:
+                print(f"INFO: {bfd_out_path} already exists.")
 
         if(self.jackhmmer_uniprot_runner is not None):
             uniprot_out_path = os.path.join(output_dir, 'uniprot_hits.sto')
-            result = run_msa_tool(
-                self.jackhmmer_uniprot_runner,
-                fasta_path=fasta_path,
-                msa_out_path=uniprot_out_path,
-                msa_format='sto',
-                max_sto_sequences=self.uniprot_max_hits,
-            )
+            if not os.path.exists(uniprot_out_path):
+                result = run_msa_tool(
+                    self.jackhmmer_uniprot_runner,
+                    fasta_path=fasta_path,
+                    msa_out_path=uniprot_out_path,
+                    msa_format='sto',
+                    max_sto_sequences=self.uniprot_max_hits,
+                )
+            else:
+                print(f"INFO: {uniprot_out_path} already exists.")
 
 
 @dataclasses.dataclass(frozen=True)
@@ -752,6 +767,7 @@ class DataPipeline:
                     with open(path, "r") as fp:
                         msa = parsers.parse_a3m(fp.read())
                 elif ext == ".sto" and filename not in ["uniprot_hits", "hmm_output"]:
+                # elif ext == ".sto" and filename not in ["hmm_output"]:
                     with open(path, "r") as fp:
                         msa = parsers.parse_stockholm(
                             fp.read()
@@ -805,6 +821,14 @@ class DataPipeline:
                         hits = parsers.parse_hmmsearch_sto(
                             fp.read(),
                             input_sequence,
+                        )
+                    all_hits[f] = hits
+                elif(f == "hmm_output.a3m"):
+                    with open(path, "r") as fp:
+                        hits = parsers.parse_hmmsearch_a3m(
+                            query_sequence=input_sequence,
+                            a3m_string=fp.read(),
+                            skip_first=False
                         )
                     all_hits[f] = hits
 
@@ -891,6 +915,13 @@ class DataPipeline:
             hits,
             self.template_featurizer,
         )
+
+        query_name = alignment_dir.rsplit("/",1)[1]
+        template_names = ' '.join([name.decode('utf-8') for name in template_features['template_domain_names']])
+        if template_names!='':
+            print(f"INFO: {query_name} custom templates: {template_names}")
+        else:
+            print(f"INFO: {query_name} custom templates: no templates")
 
         sequence_features = make_sequence_features(
             sequence=input_sequence,
@@ -1228,7 +1259,8 @@ class DataPipelineMultimer:
                 uniprot_msa_string = fp.read()
             msa = parsers.parse_stockholm(uniprot_msa_string)
 
-        all_seq_features = make_msa_features([msa])
+        # all_seq_features = make_msa_features([msa])
+        all_seq_features = make_msa_features([msa], deduplicate=False)
         valid_feats = msa_pairing.MSA_FEATURES + (
             'msa_species_identifiers',
         )

@@ -21,6 +21,7 @@ import pickle
 import random
 import time
 import json
+import pandas as pd
 
 logging.basicConfig()
 logger = logging.getLogger(__file__)
@@ -171,6 +172,56 @@ def generate_feature_dict(
 def list_files_with_extensions(dir, extensions):
     return [f for f in os.listdir(dir) if f.endswith(extensions)]
 
+ID_TO_HHBLITS_AA = {
+0: "A",
+1: "C", # Also U.
+2: "D", # Also B.
+3: "E", # Also Z.
+4: "F",
+5: "G",
+6: "H",
+7: "I",
+8: "K",
+9: "L",
+10: "M",
+11: "N",
+12: "P",
+13: "Q",
+14: "R",
+15: "S",
+16: "T",
+17: "V",
+18: "W",
+19: "Y",
+20: "X", # Includes J and O.
+21: "-",
+}
+
+AA_LITS = ["A", "C", "D", "E", "F", "G", "H", "I", "K", "L",
+"M", "N", "P", "Q", "R", "S", "T", "V", "W", "Y",
+"X", "-"]
+
+
+def msa_to_matrix(msa):
+    """
+    msa: np.array[seq_num, seq_len]
+    """
+    msa = np.array(["".join([ID_TO_HHBLITS_AA[i] for i in row]) for row in msa]).astype(str)
+
+    matrix = np.zeros((len(AA_LITS), msa.shape[1]))
+    for i in range(msa.shape[1]):
+        for j in range(msa.shape[0]):
+            aa = msa[j, i]
+            matrix[AA_LITS.index(aa), i] += 1
+    # to pandas dataframe and calculate frequency
+    matrix = matrix.T
+    matrix = matrix/matrix.sum(axis=1)[: ,None]
+    matrix = pd.DataFrame(matrix, columns=AA_LITS)
+    matrix = matrix.drop(columns=['X'])
+    matrix = matrix.T
+ 
+    return matrix, msa
+
 
 def main(args):
     # Create the output directory
@@ -241,11 +292,11 @@ def main(args):
     feature_processor = feature_pipeline.FeaturePipeline(config.data)
     if not os.path.exists(output_dir_base):
         os.makedirs(output_dir_base)
+    version = output_dir_base.rsplit("/",1)[-1].replace("openfold_out_","")
     if args.use_precomputed_alignments is None:
         alignment_dir = os.path.join(output_dir_base, "alignments")
     else:
         alignment_dir = args.use_precomputed_alignments
-
     tag_list = []
     seq_list = []
     for fasta_file in list_files_with_extensions(args.fasta_dir, (".fasta", ".fa")):
@@ -287,9 +338,20 @@ def main(args):
     for model, output_directory in model_generator:
         cur_tracing_interval = 0
         for (tag, tags), seqs in sorted_targets:
+            # Ensure that there are no large deviations when repeated batch run
+            np.random.seed(random_seed)
+            torch.manual_seed(random_seed + 1)
+
             output_name = f'{tag}_{args.config_preset}'
             if args.output_postfix is not None:
                 output_name = f'{output_name}_{args.output_postfix}'
+
+            if os.path.exists(f"{output_directory}/{output_name}_relaxed.pdb"):
+                if args.rewrite:
+                    print(f"Warning: {output_directory}/{output_name}_relaxed.pdb has existed. Rewrite!")
+                else:
+                    print(f"{output_directory}/{output_name}_relaxed.pdb has existed. Skip.")
+                    continue
 
             # Does nothing if the alignments have already been computed
             precompute_alignments(tags, seqs, alignment_dir, args)
@@ -312,6 +374,23 @@ def main(args):
                     )
 
                 feature_dicts[tag] = feature_dict
+
+            msa_feature = feature_dict['msa']
+            new_order_list = np.array((0, 4, 3, 6, 13, 7, 8, 9, 11, 10, 12, 2, 14, 5, 1, 15, 16, 19, 17, 18, 20, 21))
+            inverse_map = np.zeros_like(new_order_list)
+            inverse_map[new_order_list] = np.arange(len(new_order_list))
+            msa_feature_ori = inverse_map[msa_feature]
+            msa_string = np.array(["".join([ID_TO_HHBLITS_AA[i] for i in row]) for row in msa_feature_ori]).astype(str)
+            fasta_filename = f"/data4T/ganjh/tcr/openfold_msa/{tag}_openfold_msa_{version}.fas"
+            # 写入FASTA文件
+            with open(fasta_filename, 'w') as f:
+                for i, seq in enumerate(msa_string):
+                    # 写入头部（>seq1, >seq2...）s
+                    f.write(f">seq{i}\n")
+                    # 写入序列（每行不超过80字符是标准做法）
+                    for j in range(0, len(seq), 80):
+                        f.write(seq[j:j+80] + "\n")
+
             processed_feature_dict = feature_processor.process_features(
                 feature_dict, mode='predict', is_multimer=is_multimer
             )
@@ -432,6 +511,10 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--save_outputs", action="store_true", default=False,
+        help="Whether to save all model outputs, including embeddings, etc."
+    )
+    parser.add_argument(
+        "--rewrite", action="store_true", default=False,
         help="Whether to save all model outputs, including embeddings, etc."
     )
     parser.add_argument(
